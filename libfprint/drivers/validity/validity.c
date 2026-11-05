@@ -1157,6 +1157,16 @@ open_calibrate_build (FpiSsm            *ssm,
   g_clear_pointer (&self->capture.calib_data, g_free);
   self->capture.calib_data_len = 0;
 
+  /* Types with no calibration iterations (0xdb): python-validity only takes
+   * the blank "clean slate" image to persist it on flash, which this driver
+   * never does, and line update type 2 does not use calib_data. */
+  if (self->capture.calibration_iterations == 0)
+    {
+      fp_info ("No calibration iterations for this sensor type — skipping");
+      fpi_ssm_jump_to_state (ssm, OPEN_DONE);
+      return;
+    }
+
   fp_info ("Starting sensor calibration (%u iterations)",
            self->capture.calibration_iterations);
   fpi_ssm_next_state (ssm);
