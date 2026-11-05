@@ -79,6 +79,13 @@ typedef enum {
   FWEXT_RECV_VERIFY,
   FWEXT_SEND_REBOOT,
   FWEXT_RECV_REBOOT,
+  /* Erase-only mode (VALIDITY_FWEXT_ERASE_ONLY=1) */
+  FWEXT_ERASE_SEND_DB_WRITE_ENABLE,
+  FWEXT_ERASE_RECV_DB_WRITE_ENABLE,
+  FWEXT_ERASE_SEND,
+  FWEXT_ERASE_RECV,
+  FWEXT_ERASE_SEND_CLEANUP,
+  FWEXT_ERASE_RECV_CLEANUP,
   FWEXT_NUM_STATES,
 } ValidityFwextSsmState;
 
@@ -147,3 +154,7 @@ void     validity_fwext_upload_run_state (FpiSsm   *ssm,
 /* Create the fwext upload SSM with data attached.
  * Caller starts it via fpi_ssm_start(). */
 FpiSsm  *validity_fwext_upload_ssm_new (FpDevice *dev);
+
+/* TRUE when VALIDITY_FWEXT_ERASE_ONLY=1: the upload SSM only erases the
+ * fwext partition, and the open stops right after. */
+gboolean validity_fwext_erase_only (void);

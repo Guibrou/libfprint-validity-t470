@@ -337,6 +337,22 @@ fwext_upload_ssm_done (FpiSsm   *ssm,
 {
   FpiDeviceValidity *self = FPI_DEVICE_VALIDITY (dev);
 
+  /* Erase-only mode: stop the open here, whatever the outcome, so nothing
+   * else (calibration...) talks to the sensor. */
+  if (validity_fwext_erase_only ())
+    {
+      if (error)
+        fp_warn ("FWEXT: erase-only mode failed: %s", error->message);
+      else
+        fp_info ("FWEXT: erase-only mode done -- partition erased, stopping");
+      fpi_ssm_mark_failed (self->open_ssm,
+                           error ? error :
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                                     "Erase-only mode: partition "
+                                                     "erased, open stopped"));
+      return;
+    }
+
   if (error)
     {
       fp_warn ("Firmware extension upload failed: %s", error->message);
@@ -806,7 +822,8 @@ open_pair (FpiSsm            *ssm,
    * a sensor that was working moments ago. It must never pair (pairing
    * erases flash): run the read-only check, and let the pair SSM refuse,
    * failing the reconnect, if pairing would be needed. */
-  self->pair_state.check_only = self->in_recovery;
+  self->pair_state.check_only = self->in_recovery ||
+                                validity_fwext_erase_only ();
   self->open_ssm = ssm;
   FpiSsm *pair_ssm = validity_pair_ssm_new (dev);
   fpi_ssm_start (pair_ssm, pair_ssm_done);

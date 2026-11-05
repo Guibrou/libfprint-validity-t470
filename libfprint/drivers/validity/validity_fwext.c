@@ -35,6 +35,7 @@
 /* ---- Constants ---- */
 
 #define FWEXT_CHUNK_SIZE 0x1000              /* 4 KB per write_flash chunk */
+#define FWEXT_CHUNK_DELAY_MS 50              /* pause between chunks */
 #define FWEXT_SIGNATURE_SIZE 256             /* RSA signature length */
 #define FWEXT_HEADER_DELIMITER 0x1A          /* .xpfwext header end marker */
 
@@ -412,6 +413,7 @@ typedef struct
 {
   ValidityFwextFile fwext;
   gsize             write_offset;    /* current offset into payload */
+  guint16           erase_status;    /* erase-only mode: 0x3f status */
   guint16           vid;
   guint16           pid;
 } FwextUploadData;
@@ -546,6 +548,19 @@ fwext_send_write_chunk (FpiSsm            *ssm,
   vcsfw_tls_cmd_send (self, ssm, cmd, cmd_len, NULL);
 }
 
+/* Pause between chunks; VALIDITY_FWEXT_CHUNK_DELAY_MS overrides it for
+ * testing. */
+static guint
+fwext_chunk_delay_ms (void)
+{
+  const gchar *env = g_getenv ("VALIDITY_FWEXT_CHUNK_DELAY_MS");
+
+  if (env != NULL)
+    return (guint) g_ascii_strtoull (env, NULL, 10);
+
+  return FWEXT_CHUNK_DELAY_MS;
+}
+
 static void
 fwext_recv_cleanup (FpiSsm            *ssm,
                     FpiDeviceValidity *self)
@@ -565,8 +580,11 @@ fwext_recv_cleanup (FpiSsm            *ssm,
     }
 
   if (ud->write_offset < ud->fwext.payload_len)
-    /* More chunks to write -- loop back to db_write_enable */
-    fpi_ssm_jump_to_state (ssm, FWEXT_SEND_DB_WRITE_ENABLE);
+    /* More chunks to write -- loop back to db_write_enable. 138a:0097 drops
+     * off the bus when the next db_write_enable follows the cleanup
+     * immediately, so give the chip a pause between chunks. */
+    fpi_ssm_jump_to_state_delayed (ssm, FWEXT_SEND_DB_WRITE_ENABLE,
+                                   fwext_chunk_delay_ms ());
   else
     /* All chunks written -- proceed to signature */
     fpi_ssm_next_state (ssm);
@@ -624,6 +642,13 @@ validity_fwext_upload_run_state (FpiSsm   *ssm,
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case FWEXT_SEND_WRITE_HW_REG:
+      if (validity_fwext_erase_only ())
+        {
+          fp_info ("FWEXT: erase-only mode -- erasing partition %d, no upload",
+                   FWEXT_PARTITION);
+          fpi_ssm_jump_to_state (ssm, FWEXT_ERASE_SEND_DB_WRITE_ENABLE);
+          break;
+        }
       {
         guint8 cmd[10];
         gsize cmd_len;
@@ -751,7 +776,75 @@ validity_fwext_upload_run_state (FpiSsm   *ssm,
       fp_info ("FWEXT: Reboot sent. Device will re-enumerate.");
       fpi_ssm_mark_completed (ssm);
       break;
+
+    /* Erase-only mode, as python-validity's erase_flash(): db_write_enable,
+     * 0x3f, then call_cleanups even if the erase failed. */
+    case FWEXT_ERASE_SEND_DB_WRITE_ENABLE:
+      fwext_send_db_write_enable (ssm, self);
+      break;
+
+    case FWEXT_ERASE_RECV_DB_WRITE_ENABLE:
+      if (self->cmd_response_status != VCSFW_STATUS_OK)
+        {
+          fpi_ssm_mark_failed (ssm,
+                               fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                                         "db_write_enable failed: "
+                                                         "status=0x%04x",
+                                                         self->cmd_response_status));
+          break;
+        }
+      fpi_ssm_next_state (ssm);
+      break;
+
+    case FWEXT_ERASE_SEND:
+      {
+        guint8 cmd[] = { VCSFW_CMD_ERASE_FLASH, FWEXT_PARTITION };
+        vcsfw_tls_cmd_send (self, ssm, cmd, sizeof (cmd), NULL);
+      }
+      break;
+
+    case FWEXT_ERASE_RECV:
+      {
+        FwextUploadData *ud = fpi_ssm_get_data (ssm);
+
+        ud->erase_status = self->cmd_response_status;
+        fp_info ("FWEXT: erase partition %d: status=0x%04x",
+                 FWEXT_PARTITION, ud->erase_status);
+        fpi_ssm_next_state (ssm);
+      }
+      break;
+
+    case FWEXT_ERASE_SEND_CLEANUP:
+      {
+        guint8 cmd[] = { VCSFW_CMD_CLEANUP };
+        vcsfw_tls_cmd_send (self, ssm, cmd, sizeof (cmd), NULL);
+      }
+      break;
+
+    case FWEXT_ERASE_RECV_CLEANUP:
+      {
+        FwextUploadData *ud = fpi_ssm_get_data (ssm);
+
+        fp_info ("FWEXT: erase cleanup: status=0x%04x",
+                 self->cmd_response_status);
+        if (ud->erase_status != VCSFW_STATUS_OK)
+          {
+            fpi_ssm_mark_failed (ssm,
+                                 fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                                           "Erase failed: status=0x%04x",
+                                                           ud->erase_status));
+            break;
+          }
+        fpi_ssm_mark_completed (ssm);
+      }
+      break;
     }
+}
+
+gboolean
+validity_fwext_erase_only (void)
+{
+  return g_strcmp0 (g_getenv ("VALIDITY_FWEXT_ERASE_ONLY"), "1") == 0;
 }
 
 /* ---- SSM factory ---- */
